@@ -1,23 +1,8 @@
 import rpyc
-import time
 import random
 import _thread
 import datetime
 from rpyc.utils.server import ThreadedServer
-
-# class CriticalSection:
-#     def __init__(self):
-#         self.t_low = 10
-#         self.t_up = 10
-#
-#     def possess(self):
-#         """" simulate resource possession"""
-#         time.sleep(self.gen_hold_time)  # simulate possession
-#
-#     @property
-#     def gen_hold_time(self):
-#         """generate random value within [t_up, t_low] range"""
-#         return random.random() * (self.t_up - self.t_low) + self.t_low
 
 
 class Message:
@@ -33,6 +18,40 @@ class Message:
 system_start = datetime.datetime.now()
 processes = {}  # list to store all the processes
 
+
+def check_nodes_minimal_number():
+    k = 0
+    total = len(processes)
+    for key in processes.keys():
+        p = processes[key]
+        if p.status == "F":
+            k += 1
+
+    minimal_satisfied = True
+    min_number = 3 * k + 1
+    if total < min_number:
+        minimal_satisfied = False
+        return minimal_satisfied, k
+    return minimal_satisfied, k
+
+def print_order_message(minimal_satisfied, k, order, quorum, total):
+    s = ''
+    if k > 1:
+        s = 's'
+
+    if minimal_satisfied:
+        if k == 0:
+            print(f'Execute order: {order}! Non-faulty nodes in the system –{quorum} out of {total} '
+                  f'quorum suggest {order}')
+        else:
+            print(f'Execute order: {order}! {k} faulty node{s} in the system –{quorum} out of {total} '
+                  f'quorum suggest {order}')
+
+    else:
+        print(f'Execute order: cannot be determined – not enough generals in the system! {k} faulty node{s} in the '
+              f'system {quorum} out of {total} quorum not consistent')
+    print()
+
 class Process:
     def __init__(self, id_: int):
         self.id = id_ # 1 to N
@@ -41,6 +60,8 @@ class Process:
         self._status = "NF" # "F" (Faulty) / "NF" (Non-faulty)
         self.majority = "undefined" # "attack" / "retreat"
         self.role = "secondary" # or "primary"
+        self.received_status = []
+        self.received_generals = []
 
     @property
     def status(self):
@@ -108,21 +129,86 @@ class MonitorService(rpyc.Service):
         for p in processes.values():
             p.start()
 
+
     def exposed_actual_order_attack(self):
         print("Got the following command from client: actual-order attack")
+
+        # attack = "cannot be determined"
+        order = "attack"
+
+        print(processes.values(), processes.keys())
+
+        #first message round
+        prim_idx = list(processes.keys())[0]
+        print(prim_idx)
+        print(processes)
+        primary = processes[prim_idx]
+
+        faulty_secondary_exists = False
+
+        true_messages = len(processes) - 1
         for p in processes.values():
-            p.majority = "attack"
+            if p.role != "primary":
+                if p.status == "F":
+                    faulty_secondary_exists = True
+                if primary.status == "NF":
+                    p.received_status.append("T")
+                else:
+                    status_to_send = random.choice(["T", "F"]) # primary sends value "T" or "F" with 50% probability
+                    p.received_status.append(status_to_send)
+                    if status_to_send == "F":
+                        true_messages -= 1
+        second_message_round = False
+
+        if true_messages == len(processes) - 1:
+            if faulty_secondary_exists:
+                second_message_round = True
+            else:
+                # in case there all secondary are NF
+                for p in processes.values():
+                    p.majority = order
+                    p.received_status = []
+                    print(f'G{p.id}, {p.role}, majority={p.majority}, state={p.status}')
+        else:
+            second_message_round = True
+
+        if second_message_round:
+            # second message round
+            # here all secondary generals exchange messages
+
+
+        # for idx in list(processes.keys())[1:]:
+        #     print(list(processes.values())[idx].id)
+
+        # for p in processes.values():
+        #     for pr in processes.values():
+        #         if p.id != pr.id:
+        #             print(p.id, pr.id)
+        #             print(p.status, pr.status)
+        #             if pr.id not in p.received_generals:
+        #                 p.received_generals.append(pr.id)
+        #                 if p.status == "F":
+        #                     pr.received_status.append(0)
+        #                 else:
+        #                     pr.received_status.append(1)
 
         for p in processes.values():
-            print(f'G{p.id}, {p.role}, majority={p.majority}, state={p.status}')
-        # attack = "cannot be determined"
-        attack = "attack"
+            print(p.id, p.status, p.received_status)
+
         # if ..:
         #     attack = True
         # else:
         #     attack = False
-        print(f'Execute order: {attack}! Non-faulty nodes in the system –{1} out of {2} quorum suggest {attack}')
-        print()
+        total = len(processes)
+        quorum = 0
+        for key in processes.keys():
+            p = processes[key]
+            if p.role == "secondary":
+                if p.status == "NF":
+                    quorum+=1
+
+        minimal_satisfied, k = check_nodes_minimal_number()
+        print_order_message(minimal_satisfied, k, order, quorum, total)
 
 
     def exposed_actual_order_retreat(self):
@@ -133,15 +219,23 @@ class MonitorService(rpyc.Service):
         for p in processes.values():
             print(f'G{p.id}, {p.role}, majority={p.majority}, state={p.status}')
         # attack = "cannot be determined"
-        attack = "retreat"
+        order = "retreat"
 
         # if ..:
         #     attack = True
         # else:
         #     attack = False
+        total = len(processes)
+        quorum = 0
+        for key in processes.keys():
+            p = processes[key]
+            if p.role == "secondary":
+                if p.status == "NF":
+                    quorum += 1
 
-        print(f'Execute order: {attack}! Non-faulty nodes in the system –{1} out of {2} quorum suggest {attack}')
-        print()
+        minimal_satisfied, k = check_nodes_minimal_number()
+        print_order_message(minimal_satisfied, k, order, quorum, total)
+
 
     def exposed_g_state(self):
         print("Got the following command from client: g-state")
@@ -180,14 +274,13 @@ class MonitorService(rpyc.Service):
     def exposed_g_add_k(self, k: int):
         print(f'Got the following command from client: g-add {k}')
         last_element = list(processes)[-1]
-        print(last_element)
         for _k in range(1, k+1):
             pos = last_element+_k
             p = Process(pos)
             processes[pos] = p
 
         for p in processes.values():
-            print(f'G{p.id}, state={p.status}')
+            print(f'G{p.id}, state={p.role}')
         print()
 
 
