@@ -1,6 +1,5 @@
 # ds-miniproject-2
 
-Generals_Byzantine_program.sh N 
 * The program receives N as a parameter for starting its execution. Here, N is the number of
 processes (each process is a thread and depicts a general) that are created concurrently. N
 cannot be zero (N>0). All of these processes (generals) will forward a propose order (attack or
