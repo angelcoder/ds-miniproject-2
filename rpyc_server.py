@@ -3,21 +3,11 @@ import random
 import _thread
 import datetime
 from rpyc.utils.server import ThreadedServer
-
-
-class Message:
-    def __init__(self, resource_name: str, process_id: int, logical_time: int):
-        self.resource_name = resource_name
-        self.process_id = process_id
-        self.logical_time = logical_time
-
-    def __repr__(self):
-        return f"Message(resource_name={self.resource_name}, process_id={self.process_id}, logical_time={self.logical_time})"
-
+from copy import deepcopy
 
 system_start = datetime.datetime.now()
 processes = {}  # list to store all the processes
-
+undefined = 0
 
 def check_nodes_minimal_number():
     k = 0
@@ -34,7 +24,7 @@ def check_nodes_minimal_number():
         return minimal_satisfied, k
     return minimal_satisfied, k
 
-def print_order_message(minimal_satisfied, k, order, quorum, total):
+def print_order_message(minimal_satisfied, k, order, quorum, total, undefined):
     s = ''
     if k > 1:
         s = 's'
@@ -48,8 +38,15 @@ def print_order_message(minimal_satisfied, k, order, quorum, total):
                   f'quorum suggest {order}')
 
     else:
-        print(f'Execute order: cannot be determined – not enough generals in the system! {k} faulty node{s} in the '
-              f'system {quorum} out of {total} quorum not consistent')
+
+        majority_quorum = quorum/total
+        if majority_quorum > 0.5:
+            print(f'Execute order: {order}! {k} faulty node{s} in the system –{quorum} out of {total} '
+                  f'quorum suggest {order}')
+
+        else:
+            print(f'Execute order: cannot be determined – not enough generals in the system! {k} faulty node{s} '
+                  f'in the system {undefined} out of {total} quorum not consistent')
     print()
 
 class Process:
@@ -60,8 +57,8 @@ class Process:
         self._status = "NF" # "F" (Faulty) / "NF" (Non-faulty)
         self.majority = "undefined" # "attack" / "retreat"
         self.role = "secondary" # or "primary"
-        self.received_status = []
-        self.received_generals = []
+        self.received_status_from_primary = []
+        self.received_status_from_secondary = []
 
     @property
     def status(self):
@@ -73,35 +70,9 @@ class Process:
         self._status = val
 
 
-    def request(self, msg):
-        """generate response to a request"""
-        if self._status == "DO-NOT-WANT" or (self._status == "WANTED" and msg.logical_time < self.logical_time):
-            return "OK"  # reply message
-
     def run(self):
         while True:
             pass
-            # diff = time.perf_counter() - self.tick  # time passed
-            # if diff > self.gen_time_out:
-            #     # switch status and send messages
-            #     self.status = "WANTED"
-            #     self.broadcast()
-            #
-            #     # wait until all the reply messages to be "OK"
-            #     responses = self.responses.values()
-            #     while not all(map(lambda r: r == "OK", responses)):
-            #         responses = self.responses.values()
-            #
-            #     # possession
-            #     self.status = "HELD"
-            #     self.status = "DO-NOT-WANT"
-            #
-            #     # send reply messages to deferred requests
-            #     for p in processes.values():
-            #         if self.id != p.id:
-            #             p.responses[self.id] = "OK"
-            #
-            #     self.reset_tick()
 
     # starts a thread that runs the process
     def start(self):
@@ -132,16 +103,12 @@ class MonitorService(rpyc.Service):
 
     def exposed_actual_order_attack(self):
         print("Got the following command from client: actual-order attack")
-
-        # attack = "cannot be determined"
+        global undefined
+        undefined = 0
         order = "attack"
-
-        print(processes.values(), processes.keys())
 
         #first message round
         prim_idx = list(processes.keys())[0]
-        print(prim_idx)
-        print(processes)
         primary = processes[prim_idx]
 
         faulty_secondary_exists = False
@@ -152,89 +119,215 @@ class MonitorService(rpyc.Service):
                 if p.status == "F":
                     faulty_secondary_exists = True
                 if primary.status == "NF":
-                    p.received_status.append("T")
+                    p.received_status_from_primary.append("T")
                 else:
                     status_to_send = random.choice(["T", "F"]) # primary sends value "T" or "F" with 50% probability
-                    p.received_status.append(status_to_send)
+                    p.received_status_from_primary.append(status_to_send)
                     if status_to_send == "F":
                         true_messages -= 1
         second_message_round = False
 
-        if true_messages == len(processes) - 1:
+        if true_messages == (len(processes) - 1):
             if faulty_secondary_exists:
                 second_message_round = True
             else:
                 # in case there all secondary are NF
                 for p in processes.values():
                     p.majority = order
-                    p.received_status = []
-                    print(f'G{p.id}, {p.role}, majority={p.majority}, state={p.status}')
+                    p.received_status_from_primary = []
         else:
             second_message_round = True
+
+        secondary_processes = deepcopy(processes)
+        del secondary_processes[prim_idx]
 
         if second_message_round:
             # second message round
             # here all secondary generals exchange messages
 
+            for p_send in secondary_processes.values():
+                for p_receive in secondary_processes.values():
+                    if p_send.id != p_receive.id:
+                        if p_send.status == "NF":
+                            from_primary = p_send.received_status_from_primary
+                            p_receive.received_status_from_secondary.append(from_primary)
+                        else:
+                            status_to_send = random.choice(
+                                ["T", "F"])  # secondary sends value "T" or "F" with 50% probability
+                            p_receive.received_status_from_secondary.append(status_to_send)
 
-        # for idx in list(processes.keys())[1:]:
-        #     print(list(processes.values())[idx].id)
+            for p in secondary_processes.values():
+                values_received = []
+                from_prim = p.received_status_from_primary[0]
+                values_received.append(from_prim)
+                for from_secondary in p.received_status_from_secondary:
+                    values_received.append(from_secondary[0])
 
-        # for p in processes.values():
-        #     for pr in processes.values():
-        #         if p.id != pr.id:
-        #             print(p.id, pr.id)
-        #             print(p.status, pr.status)
-        #             if pr.id not in p.received_generals:
-        #                 p.received_generals.append(pr.id)
-        #                 if p.status == "F":
-        #                     pr.received_status.append(0)
-        #                 else:
-        #                     pr.received_status.append(1)
+                true_messages = values_received.count("T")
+                false_messages = values_received.count("F")
 
-        for p in processes.values():
-            print(p.id, p.status, p.received_status)
+                if true_messages > false_messages:
+                    p.majority = order
+                elif true_messages < false_messages:
+                    p.majority = "retreat"
+                else:
+                    undefined += 1
 
-        # if ..:
-        #     attack = True
-        # else:
-        #     attack = False
+
+            primary.majority = order
+            print(f'G{primary.id}, majority={primary.majority}, state={primary.status}')
+            for p in secondary_processes.values():
+                print(f'G{p.id}, {p.role}, majority={p.majority}, state={p.status}')
+
+        else:
+            for p in processes.values():
+                print(f'G{p.id}, {p.role}, majority={order}, state={p.status}')
+
+
         total = len(processes)
         quorum = 0
-        for key in processes.keys():
-            p = processes[key]
-            if p.role == "secondary":
-                if p.status == "NF":
-                    quorum+=1
+        quorum_attack = 0
+        quorum_retreat = 0
+
+        if second_message_round:
+            for key in secondary_processes.keys():
+                p = secondary_processes[key]
+                if p.role == "secondary":
+                    if p.majority == "retreat":
+                        quorum_retreat += 1
+                    if p.majority == "attack":
+                        quorum_attack += 1
+
+            if quorum_retreat > quorum_attack:
+                order = "retreat"
+                quorum = quorum_retreat
+            else:
+                quorum = quorum_attack
+
+
+        else:
+            for key in processes.keys():
+                p = processes[key]
+                if p.role == "secondary":
+                    if p.status == "NF":
+                        quorum += 1
+
 
         minimal_satisfied, k = check_nodes_minimal_number()
-        print_order_message(minimal_satisfied, k, order, quorum, total)
+        print_order_message(minimal_satisfied, k, order, quorum, total, undefined)
 
 
     def exposed_actual_order_retreat(self):
         print("Got the following command from client: actual-order retreat")
-        for p in processes.values():
-            p.majority = "retreat"
-
-        for p in processes.values():
-            print(f'G{p.id}, {p.role}, majority={p.majority}, state={p.status}')
-        # attack = "cannot be determined"
+        global undefined
+        undefined = 0
         order = "retreat"
 
-        # if ..:
-        #     attack = True
-        # else:
-        #     attack = False
+        # first message round
+        prim_idx = list(processes.keys())[0]
+        primary = processes[prim_idx]
+
+        faulty_secondary_exists = False
+
+        true_messages = len(processes) - 1
+        for p in processes.values():
+            if p.role != "primary":
+                if p.status == "F":
+                    faulty_secondary_exists = True
+                if primary.status == "NF":
+                    p.received_status_from_primary.append("T")
+                else:
+                    status_to_send = random.choice(["T", "F"])  # primary sends value "T" or "F" with 50% probability
+                    p.received_status_from_primary.append(status_to_send)
+                    if status_to_send == "F":
+                        true_messages -= 1
+        second_message_round = False
+
+        if true_messages == (len(processes) - 1):
+            if faulty_secondary_exists:
+                second_message_round = True
+            else:
+                # in case there all secondary are NF
+                for p in processes.values():
+                    p.majority = order
+                    p.received_status_from_primary = []
+        else:
+            second_message_round = True
+
+        secondary_processes = deepcopy(processes)
+        del secondary_processes[prim_idx]
+
+        if second_message_round:
+            # second message round
+            # here all secondary generals exchange messages
+
+            for p_send in secondary_processes.values():
+                for p_receive in secondary_processes.values():
+                    if p_send.id != p_receive.id:
+                        if p_send.status == "NF":
+                            from_primary = p_send.received_status_from_primary
+                            p_receive.received_status_from_secondary.append(from_primary)
+                        else:
+                            status_to_send = random.choice(
+                                ["T", "F"])  # secondary sends value "T" or "F" with 50% probability
+                            p_receive.received_status_from_secondary.append(status_to_send)
+
+            for p in secondary_processes.values():
+                values_received = []
+                from_prim = p.received_status_from_primary[0]
+                values_received.append(from_prim)
+                for from_secondary in p.received_status_from_secondary:
+                    values_received.append(from_secondary[0])
+
+                true_messages = values_received.count("T")
+                false_messages = values_received.count("F")
+
+                if true_messages > false_messages:
+                    p.majority = order
+                elif true_messages < false_messages:
+                    p.majority = "attack"
+                else:
+                    undefined += 1
+
+            primary.majority = order
+            print(f'G{primary.id}, majority={primary.majority}, state={primary.status}')
+            for p in secondary_processes.values():
+                print(f'G{p.id}, {p.role}, majority={p.majority}, state={p.status}')
+
+        else:
+            for p in processes.values():
+                print(f'G{p.id}, {p.role}, majority={order}, state={p.status}')
+
         total = len(processes)
         quorum = 0
-        for key in processes.keys():
-            p = processes[key]
-            if p.role == "secondary":
-                if p.status == "NF":
-                    quorum += 1
+        quorum_attack = 0
+        quorum_retreat = 0
+
+        if second_message_round:
+            for key in secondary_processes.keys():
+                p = secondary_processes[key]
+                if p.role == "secondary":
+                    if p.majority == "attack":
+                        quorum_retreat += 1
+                    if p.majority == "retreat":
+                        quorum_attack += 1
+
+            if quorum_retreat > quorum_attack:
+                order = "attack"
+                quorum = quorum_retreat
+            else:
+                quorum = quorum_attack
+
+
+        else:
+            for key in processes.keys():
+                p = processes[key]
+                if p.role == "secondary":
+                    if p.status == "NF":
+                        quorum += 1
 
         minimal_satisfied, k = check_nodes_minimal_number()
-        print_order_message(minimal_satisfied, k, order, quorum, total)
+        print_order_message(minimal_satisfied, k, order, quorum, total, undefined)
 
 
     def exposed_g_state(self):
